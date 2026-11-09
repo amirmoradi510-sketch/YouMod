@@ -1,0 +1,150 @@
+name: Build minimal YouMod
+on:
+  workflow_dispatch:
+    inputs:
+      ipa_sha256:
+        description: SHA256 of the inspected base IPA (required)
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - name: Download and verify inspected base
+        env:
+          EXPECTED_SHA256: ${{ inputs.ipa_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_SHA256" =~ ^[a-f0-9]{64}$ ]]
+          curl --fail --location --retry 3 --proto '=https' --proto-redir '=https' 'https://decrypt.stream/api/v1/download/com.google.ios.youtube?region=us' -o youtube.ipa
+          printf '%s  youtube.ipa\n' "$EXPECTED_SHA256" | shasum -a 256 -c -
+      - name: Install Dependencies
+        run: brew install make ldid
+
+      - name: Set PATH Environment Variables
+        run: |
+          echo "$(brew --prefix make)/libexec/gnubin" >> $GITHUB_PATH
+          echo "THEOS=${{ github.workspace }}/theos" >> $GITHUB_ENV
+
+      - name: Setup Theos
+        run: |
+            git clone --quiet --depth=1 --recurse-submodules https://github.com/roothide/theos.git
+            git -C theos fetch --quiet --depth=1 origin 958fea4f779943505b15b93c88bb4db8d97b346d
+            git -C theos checkout --quiet 958fea4f779943505b15b93c88bb4db8d97b346d
+            git -C theos submodule update --init --recursive
+            git clone --quiet --depth=1 -n --filter=tree:0 https://github.com/Tonwalter888/iOS-SDKs.git
+            git -C iOS-SDKs fetch --quiet --depth=1 origin a4262fddfae9ce1a211f093479edb1555f68228d
+            cd iOS-SDKs
+            git sparse-checkout set --no-cone iPhoneOS26.5.sdk
+            git checkout --quiet a4262fddfae9ce1a211f093479edb1555f68228d
+            mv *.sdk "$THEOS/sdks"
+            cd ${{ github.workspace }}/theos/vendor/logos
+            git checkout a623700
+            
+      - name: Clone headers
+        run: |
+          if [ ! -d "$THEOS/include/YouTubeHeader" ]; then
+            git clone --quiet --depth=1 https://github.com/PoomSmart/YouTubeHeader.git "$THEOS/include/YouTubeHeader"
+            git -C "$THEOS/include/YouTubeHeader" fetch --quiet --depth=1 origin 4b9977e2b243fcb143395e0a20d975a32eaa93e0
+            git -C "$THEOS/include/YouTubeHeader" checkout --quiet 4b9977e2b243fcb143395e0a20d975a32eaa93e0
+          else
+            cd $THEOS/include/YouTubeHeader
+            git pull --quiet --force
+            cd ${{ github.workspace }}
+          fi
+          
+          
+          if [ ! -d "$THEOS/include/PSHeader" ]; then
+            git clone --quiet --depth=1 https://github.com/PoomSmart/PSHeader.git "$THEOS/include/PSHeader"
+            git -C "$THEOS/include/PSHeader" fetch --quiet --depth=1 origin e550353cee1bda80884e38b31204133a7048118d
+            git -C "$THEOS/include/PSHeader" checkout --quiet e550353cee1bda80884e38b31204133a7048118d
+          else
+            cd $THEOS/include/PSHeader
+            git pull --quiet --force
+            cd ${{ github.workspace }}
+          fi
+
+      - name: Fix Theos od broken pipe issue
+        run: sed -i '' 's/od -c "$i" | head/od -c "$i" 2>\/dev\/null | head/g' $THEOS/bin/convert_xml_plist.sh || true
+
+      - name: Install cyan and tbd
+        run: pipx install https://github.com/asdfzxcvbn/pyzule-rw/archive/740d3716dcd98c20c000f12cdb88f1f0b2a533a4.zip
+
+      - name: Checkout YouMod
+        uses: actions/checkout@v7
+        with:
+          repository: Tonwalter888/YouMod
+          ref: fb6a9f6f3bbfcbe8aa8b92debda6405f2b7be2d7
+          path: YouMod
+
+      - name: Clone YouPiP
+        run: |
+          git clone --quiet --depth=1 https://github.com/PoomSmart/YouPiP.git
+          git -C YouPiP fetch --quiet --depth=1 origin 034477a48c8ec18736e26d054106df88c1f0deb3
+          git -C YouPiP checkout --quiet 034477a48c8ec18736e26d054106df88c1f0deb3
+    
+      - name: Clone YouGroupSettings
+        run: |
+          git clone --quiet --depth=1 https://github.com/PoomSmart/YouGroupSettings.git
+          git -C YouGroupSettings fetch --quiet --depth=1 origin 4697fb3e277303e0d611362982d9ddaea0424485
+          git -C YouGroupSettings checkout --quiet 4697fb3e277303e0d611362982d9ddaea0424485
+           
+      - name: Clone YTVideoOverlay
+        run: |
+          git clone --quiet --depth=1 https://github.com/PoomSmart/YTVideoOverlay.git
+          git -C YTVideoOverlay fetch --quiet --depth=1 origin f5bfd3f0cc7b3d18ea45e505da6c3120a26b89d2
+          git -C YTVideoOverlay checkout --quiet f5bfd3f0cc7b3d18ea45e505da6c3120a26b89d2
+          
+      - name: Clone UncappedAVPlayer
+        run: |
+          git clone --quiet --depth=1 https://github.com/PoomSmart/UncappedAVPlayer.git
+          git -C UncappedAVPlayer fetch --quiet --depth=1 origin d3a64ff35cb4af9046ded3f2864d236cbeef9681
+          git -C UncappedAVPlayer checkout --quiet d3a64ff35cb4af9046ded3f2864d236cbeef9681
+
+      - name: Build YouMod
+        run: |
+          cd YouMod
+          echo "YOUMOD_VERSION=$(grep '^Version:' control | cut -d ' ' -f2)" >> $GITHUB_ENV
+          make clean package DEBUG=0 FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
+          mv packages/*.deb ${{ github.workspace }}/youmod.deb
+        
+      - name: Build YouPiP
+        run: |
+          cd YouPiP
+          make clean package DEBUG=0 FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
+          mv packages/*.deb ${{ github.workspace }}/youpip.deb
+
+      - name: Build YouGroupSettings
+        run: |
+          cd YouGroupSettings
+          make clean package DEBUG=0 FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
+          mv packages/*.deb ${{ github.workspace }}/ygs.deb
+
+      - name: Build YTVideoOverlay
+        run: |
+          cd YTVideoOverlay
+          make clean package DEBUG=0 FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
+          mv packages/*.deb ${{ github.workspace }}/ytvo.deb
+
+      - name: Build UncappedAVPlayer
+        run: |
+          cd UncappedAVPlayer
+          make clean package DEBUG=0 FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless ARCHS=arm64
+          mv packages/*.deb ${{ github.workspace }}/uncapavplayer.deb
+
+      - name: Package minimal app
+        run: |
+          set -euo pipefail
+          cyan -i youtube.ipa -o YouMod-minimal.ipa -uwef youmod.deb youpip.deb ygs.deb ytvo.deb uncapavplayer.deb -n YouMod -b com.google.ios.youtube
+          shasum -a 256 YouMod-minimal.ipa > SHA256SUMS.txt
+      - name: Save build artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: YouMod-minimal
+          path: |
+            YouMod-minimal.ipa
+            SHA256SUMS.txt
+          retention-days: 3
